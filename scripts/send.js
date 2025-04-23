@@ -1,4 +1,3 @@
-
 /**
  * MailDev - send.js -- send a few emails for testing
  *
@@ -185,6 +184,20 @@ const messages = [
     text: 'This test is only for subject.'
   }
   */
+
+  {
+    from: 'Johnny Utah <johnny.utah@fbi.gov>',
+    to: 'Bodhi <bodhi@gmail.com>',
+    subject: 'CVE-2024-27448',
+    html: 'Content-ID should not allow file injection: <img src="cid:../vuln"/>',
+    attachments: [
+      {
+        filename: 'tyler.jpg',
+        path: path.join(__dirname, '/../test/tyler.jpg'),
+        cid: '../vuln'
+      }
+    ]
+  },
 
 ]
 

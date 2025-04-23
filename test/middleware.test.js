@@ -12,7 +12,6 @@ const path = require('path')
 const nodemailer = require('nodemailer')
 const express = require('express')
 const proxyMiddleware = require('http-proxy-middleware').createProxyMiddleware
-const got = require('got')
 const MailDev = require('../index.js')
 
 const smtpPort = 9080
@@ -20,11 +19,10 @@ const webPort = 9081
 const proxyPort = 9082
 const host = '0.0.0.0'
 const createTransporter = async () => {
-  const { user, pass } = await nodemailer.createTestAccount()
   return nodemailer.createTransport({
     host: '0.0.0.0',
     port: smtpPort,
-    auth: { type: 'login', user, pass }
+    auth: { type: 'login', user: 'username', pass: 'password' }
   })
 }
 
@@ -51,7 +49,7 @@ describe('middleware', function () {
     })
 
     // proxy all maildev requests to the maildev app
-    const proxy = proxyMiddleware('/maildev', {
+    const proxy = proxyMiddleware({
       target: `http://${host}:${webPort}`,
       ws: true,
       logLevel: 'silent'
@@ -74,23 +72,15 @@ describe('middleware', function () {
     })
   })
 
-  it('should run as middleware in another express app', function (done) {
+  it('should run as middleware in another express app', async () => {
     // Request to the express app
-    got(`http://${host}:${proxyPort}/`)
-      .then((res) => {
-        assert.strictEqual(res.body, 'root')
-        return got(`http://${host}:${proxyPort}/maildev/email`)
-          .then((res) => {
-            assert.strictEqual(res.statusCode, 200)
+    const res = await globalThis.fetch(`http://${host}:${proxyPort}/`)
+    assert.strictEqual(await res.text(), 'root')
 
-            const json = JSON.parse(res.body)
-            assert(Array.isArray(json))
-
-            done()
-          })
-          .catch(done)
-      })
-      .catch(done)
+    const email = await globalThis.fetch(`http://${host}:${proxyPort}/maildev/email`)
+    assert.strictEqual(email.status, 200)
+    const json = JSON.parse(await email.text())
+    assert(Array.isArray(json))
   })
 
   it('should serve email attachments with working urls', async () => {
@@ -112,10 +102,10 @@ describe('middleware', function () {
 
     return new Promise((resolve) => {
       maildev.on('new', (email) => {
-        got(`http://${host}:${proxyPort}/maildev/email/${email.id}/html`)
+        globalThis.fetch(`http://${host}:${proxyPort}/maildev/email/${email.id}/html`)
           .then(async (res) => {
             assert.strictEqual(
-              res.body,
+              await res.text(),
               `<img src="//${host}:${proxyPort}/maildev/email/${email.id}/attachment/tyler.jpg"/>`
             )
             await maildev.close()
@@ -140,10 +130,10 @@ describe('middleware', function () {
 
     return new Promise((resolve) => {
       maildev.on('new', function () {
-        got(`http://${host}:${proxyPort}/maildev/email?subject=Test&to.address=bodhi@gmail.com`)
-          .then(function (res) {
-            assert.strictEqual(res.statusCode, 200)
-            const json = JSON.parse(res.body)
+        globalThis.fetch(`http://${host}:${proxyPort}/maildev/email?subject=Test&to.address=bodhi@gmail.com`)
+          .then(async function (res) {
+            assert.strictEqual(res.status, 200)
+            const json = JSON.parse(await res.text())
             assert(json.length === 1)
             assert(json[0].subject === emailOpts.subject)
             resolve()

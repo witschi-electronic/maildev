@@ -8,6 +8,7 @@ const assert = require('assert')
 const fs = require('fs')
 const http = require('http')
 const path = require('path')
+const crypto = require('crypto')
 const nodemailer = require('nodemailer')
 
 const MailDev = require('../index.js')
@@ -19,43 +20,39 @@ const defaultMailDevOpts = {
   disableWeb: false,
   silent: true,
   smtp: port,
-  web: web,
+  web,
   ip: '0.0.0.0'
 }
 
 const createTransporter = async () => {
-  const { user, pass } = await nodemailer.createTestAccount()
   return nodemailer.createTransport({
     host: '0.0.0.0',
-    port: port,
-    auth: { type: 'login', user, pass }
-  })
-}
-
-function waitMailDevShutdown (maildev) {
-  return new Promise((resolve) => {
-    maildev.close(() => resolve())
+    port,
+    auth: { type: 'login', user: 'username', pass: 'password' }
   })
 }
 
 describe('email', () => {
   let maildev
+  let transporter
 
   before(function (done) {
     maildev = new MailDev(defaultMailDevOpts)
-    maildev.listen(done)
-  })
-
-  after(async () => {
-    await waitMailDevShutdown(maildev)
-    return new Promise((resolve) => {
-      maildev.removeAllListeners()
-      resolve()
+    maildev.listen(async function () {
+      transporter = await createTransporter()
+      done()
     })
   })
 
+  after(function (done) {
+    transporter.close()
+    maildev.close(function () {
+      maildev.removeAllListeners()
+      done()
+    });
+  })
+
   it('should strip javascript from emails', async () => {
-    const transporter = await createTransporter()
     const emailForTest = {
       from: 'johnny.utah@fbi.gov',
       to: 'bodhi@gmail.com',
@@ -73,7 +70,6 @@ describe('email', () => {
         // we need to ensure it's the email that we want.
         if (email.subject === emailForTest.subject) {
           maildev.getEmailHTML(email.id, async (_, html) => {
-            transporter.close()
             const contentWithoutNewLine = html.replace(/\n/g, '')
             try {
               assert.strictEqual(contentWithoutNewLine, '<html><head></head><body><p>The wax at the bank was surfer wax!!!</p></body></html>')
@@ -90,7 +86,6 @@ describe('email', () => {
   })
 
   it('should preserve html with table elements', async () => {
-    const transporter = await createTransporter()
     const emailForTest = {
       from: 'johnny.utah@fbi.gov',
       to: 'bodhi@gmail.com',
@@ -107,7 +102,6 @@ describe('email', () => {
         // we need to ensure it's the email that we want.
         if (email.subject === emailForTest.subject) {
           maildev.getEmailHTML(email.id, async (_, html) => {
-            transporter.close()
             const contentWithoutNewLine = html.replace(/\n/g, '')
             try {
               assert.strictEqual(contentWithoutNewLine, '<html><head></head><body><table style="border:1px solid red"><tbody><tr><td>A1</td><td>B1</td></tr><tr><td>A2</td><td>B2</td></tr></tbody></table></body></html>')
@@ -124,7 +118,6 @@ describe('email', () => {
   })
 
   it('should preserve form action attribute', async () => {
-    const transporter = await createTransporter()
     const emailForTest = {
       from: 'johnny.utah@fbi.gov',
       to: 'bodhi@gmail.com',
@@ -140,13 +133,12 @@ describe('email', () => {
         // we need to ensure it's the email that we want.
         if (email.subject === emailForTest.subject) {
           maildev.getEmailHTML(email.id, async (_, html) => {
-            transporter.close()
             const contentWithoutNewLine = html.replace(/\n/g, '')
             try {
               const action = contentWithoutNewLine.match(/action="(.*?)"/)[1]
               assert.strictEqual(action, 'mailto:example@example.com?subject=Form Submission')
             } catch (err) {
-              reject(err)
+              return reject(err)
             }
             resolve()
           })
@@ -158,58 +150,73 @@ describe('email', () => {
   })
 
   it('should handle embedded images with cid', async () => {
-    const transporter = await createTransporter()
-
+    const prefix = 'test-cid-replacement';
+    const cid = 'image';
     const emailsForTest = [
       {
         from: 'johnny.utah@fbi.gov',
         to: 'bodhi@gmail.com',
-        subject: 'Test cid replacement #1',
-        html: '<img src="cid:image"/>',
+        subject: `${prefix}-1`,
+        html: `<img src="cid:${cid}"/>`,
         attachments: [
           {
             filename: 'tyler.jpg',
             path: path.join(__dirname, 'tyler.jpg'),
-            cid: 'image'
+            cid,
           }
         ]
       },
       {
         from: 'johnny.utah@fbi.gov',
         to: 'bodhi@gmail.com',
-        subject: 'Test cid replacement #2',
-        html: '<img src="cid:image"/>',
+        subject: `${prefix}-2`,
+        html: `<img src="cid:${cid}"/>`,
         attachments: [
           {
             filename: 'wave.jpg',
             path: path.join(__dirname, 'wave.jpg'),
-            cid: 'image'
+            cid,
           }
         ]
       }
     ]
-
-    let seenEmails = 0
+    let receivedEmails = 0;
 
     return new Promise((resolve, reject) => {
       maildev.on('new', (email) => {
+        // Filter out other events for other tests
+        if (!email.subject.startsWith(prefix)) {
+          return ;
+        }
         // Simple replacement to root url
         maildev.getEmailHTML(email.id, (_, html) => {
-          const attachmentFilename = (email.subject.endsWith('#1')) ? 'tyler.jpg' : 'wave.jpg'
+          const attachmentFilename = (email.subject.endsWith('1')) ? 'tyler.jpg' : 'wave.jpg'
+          // The filename is hashed based on content id
+          const hashedFilename = function(fileName){
+            return path.format({
+              name: crypto.createHash('md5').update(cid).digest('hex'),
+              ext: path.extname(fileName) })
+          }(attachmentFilename);
           const contentWithoutNewLine = html.replace(/\n/g, '')
-          assert.strictEqual(contentWithoutNewLine, '<html><head></head><body><img src="/email/' + email.id + '/attachment/' + attachmentFilename + '"></body></html>')
-          const host = `${defaultMailDevOpts.ip}:${web}`
-          const attachmentLink = `${host}/email/${email.id}/attachment/${attachmentFilename}`
+          const httpFilePathName = `/email/${email.id}/attachment/${hashedFilename}`
+          assert.strictEqual(contentWithoutNewLine, '<html><head></head><body><img src="'+ httpFilePathName + '"></body></html>')
 
-          // Pass baseUrl
+          // Test host file prefixing:
+          const host = `${defaultMailDevOpts.ip}:${web}`
+          const attachmentUrl = `${host}${httpFilePathName}`
+
+          // Pass baseUrl (host)
           maildev.getEmailHTML(email.id, host, (_, html) => {
             const contentWithoutNewLine = html.replace(/\n/g, '')
-            assert.strictEqual(contentWithoutNewLine, `<html><head></head><body><img src="//${attachmentLink}"></body></html>`)
+            try {
+            assert.strictEqual(contentWithoutNewLine, `<html><head></head><body><img src="//${attachmentUrl}"></body></html>`,
+              'attachment url should be prefixed with host ip and port and protocol-agnostic //'
+            )} catch(err) { reject(err)}
 
             // Check contents of attached/embedded files
-            http.get(`http://${attachmentLink}`, (res) => {
+            http.get(`http://${attachmentUrl}`, (res) => {
               if (res.statusCode !== 200) {
-                reject(new Error('Failed to get attachment: ' + res.statusCode))
+                return reject(new Error('Failed to get attachment: ' + res.statusCode))
               }
               let data = ''
               res.setEncoding('binary')
@@ -220,9 +227,9 @@ describe('email', () => {
                 const fileContents = fs.readFileSync(path.join(__dirname, attachmentFilename), 'binary')
                 assert.strictEqual(data, fileContents)
 
-                seenEmails += 1
-                if (seenEmails) {
-                  resolve()
+                receivedEmails = receivedEmails + 1;
+                if (receivedEmails >= emailsForTest.length) {
+                  resolve();
                 }
               })
             })
@@ -233,6 +240,58 @@ describe('email', () => {
       emailsForTest.forEach(async (email) => {
         await transporter.sendMail(email)
       })
+    })
+  })
+
+  it('should not allow attachment cid with malicious path (CVE-2024-27448)', async () => {
+    const cid = '../vuln'
+    const filename = 'tyler.jpg'
+    const subject = 'test-CVE-2024-27448'
+    const testEmail = {
+      from: 'johnny.utah@fbi.gov',
+      to: 'bodhi@gmail.com',
+      subject,
+      html: `<img src="cid:${cid}"/>`,
+      attachments: [
+        {
+          filename,
+          path: path.join(__dirname, filename),
+          cid,
+        }
+      ]
+    }
+
+    const hashedFilename = path.format({
+      name: crypto.createHash('md5').update(cid).digest('hex'),
+      ext: path.extname(filename)
+    })
+
+    return new Promise((resolve, reject) => {
+      maildev.on('new', (email) => {
+        // Filter out other events for other tests
+        if (email.subject !== subject) {
+          return;
+        }
+        // Simple replacement to root url
+        maildev.getEmailHTML(email.id, (_, html) => {
+          const contentWithoutNewLine = html.replace(/\n/g, '')
+          const httpFilePathName = `/email/${email.id}/attachment/${hashedFilename}`
+          try {
+            assert.strictEqual(contentWithoutNewLine, '<html><head></head><body><img src="'+ httpFilePathName + '"></body></html>',
+              'it should contain the properly hashed cid filename'
+            )
+            // Also tests getAttachmentFilePath in this integration test
+            const filePath = path.join(maildev.mailDir, email.id, hashedFilename)
+            const isFileAtCorrectPath = fs.existsSync(filePath)
+            assert.ok(isFileAtCorrectPath, 'attachment file was created at the correct location within the temp directory')
+            resolve();
+          } catch (err) {
+            return reject(err);
+          }
+        })
+      })
+
+      transporter.sendMail(testEmail)
     })
   })
 })
